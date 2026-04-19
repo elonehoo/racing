@@ -32,6 +32,66 @@ canvas {
   inset: 0;
   pointer-events: none;
 }
+
+.racing-hud {
+  position: absolute;
+  inset: 0;
+  z-index: 18;
+}
+
+.racing-inset {
+  position: absolute;
+  pointer-events: none;
+  border-radius: 1.1rem;
+  background: rgba(6, 10, 12, 0.12);
+  box-shadow:
+    0 1.25rem 3rem rgba(0, 0, 0, 0.34),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+.racing-inset::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  border: 1px solid rgba(255, 214, 154, 0.2);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  pointer-events: none;
+}
+
+.racing-inset::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(180deg, rgba(9, 14, 17, 0.42), transparent 38%);
+  pointer-events: none;
+}
+
+.racing-preview-overlay {
+  pointer-events: auto;
+  cursor: pointer;
+  transition: transform 140ms ease, border-color 140ms ease;
+}
+
+.racing-preview-overlay:hover {
+  transform: translateY(-2px);
+}
+
+.racing-preview-overlay:active {
+  transform: translateY(0);
+}
+
+.racing-minimap-overlay {
+  background:
+    linear-gradient(180deg, rgba(9, 14, 17, 0.18), rgba(4, 7, 9, 0.08));
+}
+
+.racing-preview-overlay {
+  background:
+    linear-gradient(180deg, rgba(255, 208, 119, 0.08), rgba(4, 7, 9, 0.04));
+}
+
 .racing-loader-card h2 {
   margin: 0.15rem 0 0.45rem;
   font-size: clamp(1.2rem, 2vw, 1.6rem);
@@ -115,6 +175,10 @@ canvas {
 }
 
 @media (max-width: 720px) {
+  .racing-inset {
+    border-radius: 0.9rem;
+  }
+
   .steer-base {
     left: 1rem;
     bottom: 1rem;
