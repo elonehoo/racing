@@ -1,0 +1,25 @@
+{
+  "name": "racing",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "nuxt build",
+    "dev": "nuxt dev",
+    "generate": "nuxt generate",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare"
+  },
+  "dependencies": {
+    "@tresjs/core": "5.8.0",
+    "@tresjs/nuxt": "5.6.0",
+    "crashcat": "^0.0.3",
+    "nuxt": "^4.4.2",
+    "three": "0.184.0",
+    "vue": "^3.5.32",
+    "vue-router": "^5.0.4"
+  },
+  "devDependencies": {
+    "@types/three": "^0.184.0",
+    "@vue/language-core": "^3.1.2"
+  }
+}
