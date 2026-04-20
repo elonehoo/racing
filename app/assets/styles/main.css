@@ -44,6 +44,145 @@ canvas {
   z-index: 18;
 }
 
+.racing-room-panel {
+  position: absolute;
+  top: 1.1rem;
+  left: 1.1rem;
+  width: min(22rem, calc(100vw - 2.2rem));
+  padding: 1rem 1.05rem;
+  border-radius: 1.15rem;
+  pointer-events: auto;
+  background:
+    linear-gradient(180deg, rgba(18, 24, 28, 0.88), rgba(7, 11, 13, 0.8));
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    0 1.2rem 3rem rgba(0, 0, 0, 0.35),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(18px);
+}
+
+.racing-room-panel h3 {
+  margin: 0.18rem 0 0;
+  font-size: 1.12rem;
+  line-height: 1.1;
+}
+
+.racing-room-status {
+  margin: 0.55rem 0 0;
+  min-height: 2.5em;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 0.92rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.racing-room-status.is-error {
+  color: #ffb2aa;
+}
+
+.racing-room-fields {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 0.85rem;
+}
+
+.racing-room-field {
+  display: grid;
+  gap: 0.34rem;
+}
+
+.racing-room-field span {
+  color: rgba(255, 255, 255, 0.66);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.racing-room-input {
+  width: 100%;
+  padding: 0.76rem 0.86rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.85rem;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+  outline: none;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.racing-room-input:focus {
+  border-color: rgba(255, 208, 119, 0.6);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.racing-room-actions {
+  display: flex;
+  gap: 0.65rem;
+  margin-top: 0.9rem;
+}
+
+.racing-room-button {
+  flex: 1;
+  min-height: 2.8rem;
+  padding: 0.7rem 0.9rem;
+  border: 0;
+  border-radius: 0.9rem;
+  color: #fff;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  transition: transform 120ms ease, background 120ms ease, opacity 120ms ease;
+}
+
+.racing-room-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.racing-room-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.racing-room-button.is-primary {
+  color: #15120b;
+  background: linear-gradient(180deg, #ffd684, #efac46);
+  box-shadow:
+    0 0.6rem 1.6rem rgba(239, 172, 70, 0.28),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+}
+
+.racing-room-roster {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.95rem;
+}
+
+.racing-room-player {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.62rem 0.7rem;
+  border-radius: 0.8rem;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.racing-room-player.is-self {
+  background: rgba(255, 214, 132, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(255, 214, 132, 0.2);
+}
+
+.racing-room-player-slot,
+.racing-room-player-state {
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 0.76rem;
+  text-transform: uppercase;
+}
+
+.racing-room-player-name {
+  font-size: 0.95rem;
+}
+
 .racing-inset {
   position: absolute;
   pointer-events: none;
@@ -191,6 +330,17 @@ canvas {
 }
 
 @media (max-width: 720px) {
+  .racing-room-panel {
+    top: 0.8rem;
+    left: 0.8rem;
+    width: min(20rem, calc(100vw - 1.6rem));
+    padding: 0.85rem 0.9rem;
+  }
+
+  .racing-room-actions {
+    flex-direction: column;
+  }
+
   .racing-inset {
     border-radius: 0.9rem;
   }

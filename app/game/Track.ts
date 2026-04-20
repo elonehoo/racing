@@ -391,7 +391,10 @@ export function decodeCells(str: string): TrackCell[] {
   return cells
 }
 
-export function computeSpawnPosition(cells: readonly TrackCell[]): SpawnInfo {
+export function computeSpawnPosition(
+  cells: readonly TrackCell[],
+  slot?: number,
+): SpawnInfo {
   const cell = cells.find(entry => entry[2] === 'track-finish') ?? cells[0]
 
   if (!cell) {
@@ -403,7 +406,28 @@ export function computeSpawnPosition(cells: readonly TrackCell[]): SpawnInfo {
   const z = (gz + 0.5) * CELL_RAW * GRID_SCALE
   const angle = THREE.MathUtils.degToRad(ORIENT_DEG[orient])
 
-  return { position: [x, 0.5, z], angle }
+  if (slot === undefined || slot < 0) {
+    return { position: [x, 0.5, z], angle }
+  }
+
+  const forwardX = Math.sin(angle)
+  const forwardZ = Math.cos(angle)
+  const rightX = Math.cos(angle)
+  const rightZ = -Math.sin(angle)
+  const carsPerRow = 2
+  const laneIndex = slot % carsPerRow
+  const rowIndex = Math.floor(slot / carsPerRow)
+  const laneOffset = laneIndex === 0 ? -1.2 : 1.2
+  const rowOffset = rowIndex * 2.8
+
+  return {
+    position: [
+      x + rightX * laneOffset - forwardX * rowOffset,
+      0.5,
+      z + rightZ * laneOffset - forwardZ * rowOffset,
+    ],
+    angle,
+  }
 }
 
 export function computeTrackBounds(cells?: readonly TrackCell[] | null): TrackBounds {

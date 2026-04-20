@@ -38,22 +38,35 @@ import { loadModels } from '../game/assets'
 import { SmokeTrails } from '../game/Particles'
 import { buildWallColliders, createSphereBody } from '../game/Physics'
 import type { RacingWorld } from '../game/Physics'
+import { RemoteVehicle } from '../game/RemoteVehicle'
 import {
   buildTrack,
   computeSpawnPosition,
   computeTrackBounds,
   decodeCells,
   TRACK_CELLS,
+  type LoadedModels,
   type SpawnInfo,
   type TrackBounds,
   type TrackCell,
 } from '../game/Track'
+import {
+  getVehicleModelForSlot,
+  makeGuestName,
+  normalizeRoomCode,
+  ROOM_SYNC_INTERVAL_MS,
+  type RoomPlayerSnapshot,
+  type RoomSessionResponse,
+} from '../game/multiplayer'
 import { Vehicle } from '../game/Vehicle'
 
 const VEHICLE_LAYER = 1
 const MAIN_COCKPIT_LAYER = 2
 const PREVIEW_COCKPIT_LAYER = 3
 const MINIMAP_PADDING = 4
+const ROOM_QUERY_KEY = 'room'
+const PLAYER_QUERY_KEY = 'player'
+const SLOT_QUERY_KEY = 'slot'
 const firstPersonEnabled = false
 const previewEnabled = false
 const minimapEnabled = false
@@ -85,10 +98,25 @@ interface HudPanel {
   right?: number
 }
 
+interface MultiplayerState {
+  status: 'idle' | 'joining' | 'connected' | 'error'
+  roomId: string
+  playerId: string
+  slot: number | null
+  playerName: string
+  joinCode: string
+  shareUrl: string
+  players: RoomPlayerSnapshot[]
+  maxPlayers: number
+  message: string
+  error: string
+}
+
 interface GameState {
   initialized: boolean
   scene: Scene | null
   worldRoot: Group | null
+  remoteVehiclesRoot: Group | null
   world: RacingWorld | null
   vehicle: Vehicle | null
   cameraRig: GameCamera | null
@@ -104,12 +132,16 @@ interface GameState {
   dirLight: DirectionalLight | null
   hemiLight: HemisphereLight | null
   contactListener: Listener | null
+  models: LoadedModels | null
+  trackCells: readonly TrackCell[]
+  remoteVehicles: Map<string, RemoteVehicle>
 }
 
 const game: GameState = {
   initialized: false,
   scene: null,
   worldRoot: null,
+  remoteVehiclesRoot: null,
   world: null,
   vehicle: null,
   cameraRig: null,
@@ -125,9 +157,28 @@ const game: GameState = {
   dirLight: null,
   hemiLight: null,
   contactListener: null,
+  models: null,
+  trackCells: TRACK_CELLS,
+  remoteVehicles: new Map(),
 }
 
+const multiplayer = reactive<MultiplayerState>({
+  status: 'idle',
+  roomId: '',
+  playerId: '',
+  slot: null,
+  playerName: '',
+  joinCode: '',
+  shareUrl: '',
+  players: [],
+  maxPlayers: 0,
+  message: '',
+  error: '',
+})
+
 let resizeObserver: ResizeObserver | null = null
+let roomSyncTimer: number | null = null
+let roomSyncInFlight = false
 
 const previewMode = computed<CameraMode>(() => {
   if (!firstPersonEnabled) {
@@ -194,11 +245,65 @@ const minimapWindowStyle = computed(() => {
   }
 })
 
+const roomRoster = computed(() => (
+  [...multiplayer.players].sort((left, right) => left.slot - right.slot)
+))
+
+const roomConnected = computed(() => (
+  Boolean(multiplayer.roomId && multiplayer.playerId)
+))
+
+const roomStatusText = computed(() => {
+  if (multiplayer.status === 'joining') {
+    return 'Connecting to room...'
+  }
+
+  if (multiplayer.error) {
+    return multiplayer.error
+  }
+
+  if (multiplayer.message) {
+    return multiplayer.message
+  }
+
+  if (roomConnected.value) {
+    return `${multiplayer.players.length}/${multiplayer.maxPlayers || 6} drivers online`
+  }
+
+  return 'Create a room or join one from a link.'
+})
+
 registerAll()
 
-function getMapParam() {
-  const value = route.query.map
+function getQueryParam(key: string) {
+  if (typeof window !== 'undefined') {
+    return new URL(window.location.href).searchParams.get(key)
+  }
+
+  const value = route.query[key]
   return typeof value === 'string' ? value : null
+}
+
+function getMapParam() {
+  return getQueryParam('map')
+}
+
+function getRoomParam() {
+  return normalizeRoomCode(getQueryParam(ROOM_QUERY_KEY) ?? '')
+}
+
+function getPlayerParam() {
+  return getQueryParam(PLAYER_QUERY_KEY)
+}
+
+function getSlotParam() {
+  const raw = getQueryParam(SLOT_QUERY_KEY)
+  if (!raw) {
+    return null
+  }
+
+  const slot = Number(raw)
+  return Number.isInteger(slot) && slot >= 0 ? slot : null
 }
 
 function getOppositeMode(mode: CameraMode): CameraMode {
@@ -325,7 +430,418 @@ function swapCameraViews() {
   syncCameraModes()
 }
 
+function updateBrowserUrl(params: {
+  roomId?: string | null
+  playerId?: string | null
+  slot?: number | null
+  map?: string | null
+}) {
+  const url = new URL(window.location.href)
+
+  if (params.roomId) {
+    url.searchParams.set(ROOM_QUERY_KEY, params.roomId)
+  }
+  else {
+    url.searchParams.delete(ROOM_QUERY_KEY)
+  }
+
+  if (params.playerId) {
+    url.searchParams.set(PLAYER_QUERY_KEY, params.playerId)
+  }
+  else {
+    url.searchParams.delete(PLAYER_QUERY_KEY)
+  }
+
+  if (params.slot === null || params.slot === undefined) {
+    url.searchParams.delete(SLOT_QUERY_KEY)
+  }
+  else {
+    url.searchParams.set(SLOT_QUERY_KEY, `${params.slot}`)
+  }
+
+  if (params.map) {
+    url.searchParams.set('map', params.map)
+  }
+  else {
+    url.searchParams.delete('map')
+  }
+
+  window.history.replaceState(window.history.state, '', url)
+}
+
+function buildRoomShareUrl(roomId: string, map: string | null) {
+  const url = new URL(window.location.href)
+  url.searchParams.set(ROOM_QUERY_KEY, roomId)
+  url.searchParams.delete(PLAYER_QUERY_KEY)
+  url.searchParams.delete(SLOT_QUERY_KEY)
+
+  if (map) {
+    url.searchParams.set('map', map)
+  }
+  else {
+    url.searchParams.delete('map')
+  }
+
+  return url.toString()
+}
+
+function adoptRoomSession(session: RoomSessionResponse) {
+  multiplayer.status = 'connected'
+  multiplayer.roomId = session.roomId
+  multiplayer.playerId = session.player.id
+  multiplayer.slot = session.player.slot
+  multiplayer.playerName = session.player.name
+  multiplayer.players = session.players
+  multiplayer.maxPlayers = session.maxPlayers
+  multiplayer.joinCode = session.roomId
+  multiplayer.shareUrl = buildRoomShareUrl(session.roomId, session.map)
+  multiplayer.error = ''
+}
+
+function clearRemoteVehicles() {
+  for (const remote of game.remoteVehicles.values()) {
+    game.remoteVehiclesRoot?.remove(remote.container)
+  }
+
+  game.remoteVehicles.clear()
+}
+
+function syncRemoteVehicles(players: RoomPlayerSnapshot[]) {
+  const rootNode = game.remoteVehiclesRoot
+  const models = game.models
+
+  if (!rootNode || !models) {
+    return
+  }
+
+  const activeIds = new Set<string>()
+
+  for (const player of players) {
+    if (player.id === multiplayer.playerId) {
+      continue
+    }
+
+    activeIds.add(player.id)
+
+    let remote = game.remoteVehicles.get(player.id)
+    if (!remote) {
+      remote = new RemoteVehicle(models[getVehicleModelForSlot(player.slot)])
+      setLayer(remote.container, VEHICLE_LAYER)
+      rootNode.add(remote.container)
+      game.remoteVehicles.set(player.id, remote)
+    }
+
+    remote.applySnapshot(player)
+  }
+
+  for (const [playerId, remote] of game.remoteVehicles) {
+    if (activeIds.has(playerId)) {
+      continue
+    }
+
+    rootNode.remove(remote.container)
+    game.remoteVehicles.delete(playerId)
+  }
+}
+
+function resetVehicleToSpawn(slot?: number | null) {
+  const vehicle = game.vehicle
+  const world = game.world
+
+  if (!vehicle || !world) {
+    return
+  }
+
+  const spawn = computeSpawnPosition(game.trackCells, slot ?? undefined)
+  const [sx, sy, sz] = spawn.position
+  const body = vehicle.rigidBody
+
+  if (body) {
+    rigidBody.setPosition(world, body, spawn.position, false)
+    rigidBody.setLinearVelocity(world, body, [0, 0, 0])
+    rigidBody.setAngularVelocity(world, body, [0, 0, 0])
+  }
+
+  vehicle.spherePos.set(sx, sy, sz)
+  vehicle.sphereVel.set(0, 0, 0)
+  vehicle.modelVelocity.set(0, 0, 0)
+  vehicle.linearSpeed = 0
+  vehicle.angularSpeed = 0
+  vehicle.acceleration = 0
+  vehicle.inputX = 0
+  vehicle.inputZ = 0
+  vehicle.container.position.set(sx, sy - 0.5, sz)
+  vehicle.container.rotation.set(0, spawn.angle, 0)
+  vehicle.container.quaternion.setFromAxisAngle(new Vector3(0, 1, 0), spawn.angle)
+  vehicle.prevModelPos.copy(vehicle.container.position)
+  game.cameraRig?.targetPosition.copy(vehicle.spherePos)
+  game.previewCameraRig?.targetPosition.copy(vehicle.spherePos)
+}
+
+function stopRoomSync() {
+  if (roomSyncTimer !== null) {
+    window.clearInterval(roomSyncTimer)
+    roomSyncTimer = null
+  }
+
+  roomSyncInFlight = false
+}
+
+function clearRoomSession(updateUrl = true) {
+  stopRoomSync()
+  clearRemoteVehicles()
+
+  multiplayer.status = 'idle'
+  multiplayer.roomId = ''
+  multiplayer.playerId = ''
+  multiplayer.slot = null
+  multiplayer.shareUrl = ''
+  multiplayer.players = []
+  multiplayer.maxPlayers = 0
+  multiplayer.message = ''
+  multiplayer.error = ''
+
+  if (updateUrl) {
+    updateBrowserUrl({
+      roomId: null,
+      playerId: null,
+      slot: null,
+      map: getMapParam(),
+    })
+  }
+}
+
+async function syncRoomState() {
+  if (!roomConnected.value || !game.vehicle) {
+    return
+  }
+
+  if (roomSyncInFlight) {
+    return
+  }
+
+  roomSyncInFlight = true
+
+  try {
+    const vehicle = game.vehicle
+    const session = await $fetch<RoomSessionResponse>(`/api/rooms/${multiplayer.roomId}/sync`, {
+      method: 'POST',
+      body: {
+        playerId: multiplayer.playerId,
+        state: {
+          x: vehicle.spherePos.x,
+          y: vehicle.spherePos.y,
+          z: vehicle.spherePos.z,
+          rotationY: vehicle.container.rotation.y,
+          speed: vehicle.linearSpeed,
+          steering: vehicle.inputX,
+          drift: vehicle.driftIntensity,
+        },
+      },
+    })
+
+    adoptRoomSession(session)
+    syncRemoteVehicles(session.players)
+  }
+  catch (error) {
+    multiplayer.status = 'error'
+    multiplayer.error = error instanceof Error ? error.message : 'Room sync failed.'
+    stopRoomSync()
+    clearRemoteVehicles()
+  }
+  finally {
+    roomSyncInFlight = false
+  }
+}
+
+function startRoomSync() {
+  if (!roomConnected.value || roomSyncTimer !== null) {
+    return
+  }
+
+  roomSyncTimer = window.setInterval(() => {
+    void syncRoomState()
+  }, ROOM_SYNC_INTERVAL_MS)
+
+  void syncRoomState()
+}
+
+function roomMapMatchesCurrent(map: string | null) {
+  return map === getMapParam()
+}
+
+function redirectToRoomSession(session: RoomSessionResponse) {
+  const url = new URL(window.location.href)
+  url.searchParams.set(ROOM_QUERY_KEY, session.roomId)
+  url.searchParams.set(PLAYER_QUERY_KEY, session.player.id)
+  url.searchParams.set(SLOT_QUERY_KEY, `${session.player.slot}`)
+
+  if (session.map) {
+    url.searchParams.set('map', session.map)
+  }
+  else {
+    url.searchParams.delete('map')
+  }
+
+  window.location.replace(url.toString())
+}
+
+async function bootstrapRoomSession() {
+  const roomId = getRoomParam()
+  if (!roomId) {
+    return null
+  }
+
+  multiplayer.joinCode = roomId
+
+  const playerId = getPlayerParam()
+  const slot = getSlotParam()
+
+  if (playerId && slot !== null) {
+    multiplayer.status = 'connected'
+    multiplayer.roomId = roomId
+    multiplayer.playerId = playerId
+    multiplayer.slot = slot
+    multiplayer.playerName = multiplayer.playerName || makeGuestName()
+    multiplayer.shareUrl = buildRoomShareUrl(roomId, getMapParam())
+    return slot
+  }
+
+  multiplayer.status = 'joining'
+  multiplayer.error = ''
+  multiplayer.message = ''
+
+  try {
+    const session = await $fetch<RoomSessionResponse>(`/api/rooms/${roomId}/join`, {
+      method: 'POST',
+      body: {
+        playerName: multiplayer.playerName || makeGuestName(),
+      },
+    })
+
+    if (!roomMapMatchesCurrent(session.map)) {
+      redirectToRoomSession(session)
+      return 'redirected'
+    }
+
+    adoptRoomSession(session)
+    updateBrowserUrl({
+      roomId: session.roomId,
+      playerId: session.player.id,
+      slot: session.player.slot,
+      map: session.map,
+    })
+    return session.player.slot
+  }
+  catch (error) {
+    clearRoomSession(false)
+    multiplayer.status = 'error'
+    multiplayer.error = error instanceof Error ? error.message : 'Unable to join room.'
+    updateBrowserUrl({
+      roomId: null,
+      playerId: null,
+      slot: null,
+      map: getMapParam(),
+    })
+    return null
+  }
+}
+
+async function createRoom() {
+  multiplayer.status = 'joining'
+  multiplayer.error = ''
+  multiplayer.message = ''
+
+  try {
+    const session = await $fetch<RoomSessionResponse>('/api/rooms', {
+      method: 'POST',
+      body: {
+        map: getMapParam(),
+        playerName: multiplayer.playerName || makeGuestName(),
+      },
+    })
+
+    adoptRoomSession(session)
+    updateBrowserUrl({
+      roomId: session.roomId,
+      playerId: session.player.id,
+      slot: session.player.slot,
+      map: session.map,
+    })
+    resetVehicleToSpawn(session.player.slot)
+    startRoomSync()
+  }
+  catch (error) {
+    multiplayer.status = 'error'
+    multiplayer.error = error instanceof Error ? error.message : 'Unable to create room.'
+  }
+}
+
+async function joinRoom() {
+  const roomId = normalizeRoomCode(multiplayer.joinCode)
+  if (!roomId) {
+    multiplayer.status = 'error'
+    multiplayer.error = 'Enter a valid room code.'
+    return
+  }
+
+  multiplayer.status = 'joining'
+  multiplayer.error = ''
+  multiplayer.message = ''
+
+  try {
+    const session = await $fetch<RoomSessionResponse>(`/api/rooms/${roomId}/join`, {
+      method: 'POST',
+      body: {
+        playerName: multiplayer.playerName || makeGuestName(),
+      },
+    })
+
+    if (!roomMapMatchesCurrent(session.map)) {
+      redirectToRoomSession(session)
+      return
+    }
+
+    adoptRoomSession(session)
+    updateBrowserUrl({
+      roomId: session.roomId,
+      playerId: session.player.id,
+      slot: session.player.slot,
+      map: session.map,
+    })
+    resetVehicleToSpawn(session.player.slot)
+    startRoomSync()
+  }
+  catch (error) {
+    multiplayer.status = 'error'
+    multiplayer.error = error instanceof Error ? error.message : 'Unable to join room.'
+  }
+}
+
+async function copyShareLink() {
+  if (!multiplayer.shareUrl) {
+    return
+  }
+
+  try {
+    await navigator.clipboard.writeText(multiplayer.shareUrl)
+    multiplayer.message = 'Invite link copied.'
+    multiplayer.error = ''
+  }
+  catch {
+    multiplayer.status = 'error'
+    multiplayer.error = multiplayer.shareUrl
+  }
+}
+
+function leaveRoom() {
+  clearRoomSession()
+  resetVehicleToSpawn(null)
+}
+
 function disposeGame() {
+  stopRoomSync()
+  clearRemoteVehicles()
   game.controls?.dispose()
   game.audio?.dispose()
   game.particles?.dispose()
@@ -353,6 +869,7 @@ function disposeGame() {
 
   game.scene = null
   game.worldRoot = null
+  game.remoteVehiclesRoot = null
   game.world = null
   game.vehicle = null
   game.cameraRig = null
@@ -368,6 +885,8 @@ function disposeGame() {
   game.dirLight = null
   game.hemiLight = null
   game.contactListener = null
+  game.models = null
+  game.trackCells = TRACK_CELLS
   game.initialized = false
   loading.value = true
 }
@@ -388,6 +907,11 @@ async function handleReady(context: TresContext) {
       throw new Error('TresJS active camera is unavailable.')
     }
 
+    const roomSlot = await bootstrapRoomSession()
+    if (roomSlot === 'redirected') {
+      return
+    }
+
     const mapParam = getMapParam()
     let customCells: TrackCell[] | null = null
     let spawn: SpawnInfo | null = null
@@ -395,7 +919,6 @@ async function handleReady(context: TresContext) {
     if (mapParam) {
       try {
         customCells = decodeCells(mapParam)
-        spawn = computeSpawnPosition(customCells)
       }
       catch {
         customCells = null
@@ -403,6 +926,7 @@ async function handleReady(context: TresContext) {
     }
 
     const cells = customCells || TRACK_CELLS
+    spawn = computeSpawnPosition(cells, typeof roomSlot === 'number' ? roomSlot : undefined)
     const bounds = computeTrackBounds(cells)
     trackBoundsState.centerX = bounds.centerX
     trackBoundsState.centerZ = bounds.centerZ
@@ -447,6 +971,8 @@ async function handleReady(context: TresContext) {
 
     const worldRoot = new Group()
     scene.add(worldRoot)
+    const remoteVehiclesRoot = new Group()
+    worldRoot.add(remoteVehiclesRoot)
 
     const models = await loadModels()
     buildTrack(worldRoot, models, customCells)
@@ -491,7 +1017,10 @@ async function handleReady(context: TresContext) {
       vehicle.container.rotation.y = spawn.angle
     }
 
-    const vehicleGroup = vehicle.init(models['vehicle-truck-yellow'])
+    const vehicleModel = typeof roomSlot === 'number'
+      ? models[getVehicleModelForSlot(roomSlot)]
+      : models['vehicle-truck-yellow']
+    const vehicleGroup = vehicle.init(vehicleModel)
     setLayer(vehicleGroup, VEHICLE_LAYER)
     worldRoot.add(vehicleGroup)
     vehicle.container.position.set(
@@ -562,6 +1091,7 @@ async function handleReady(context: TresContext) {
 
     game.scene = scene
     game.worldRoot = worldRoot
+    game.remoteVehiclesRoot = remoteVehiclesRoot
     game.world = world
     game.vehicle = vehicle
     game.cameraRig = cameraRig
@@ -577,6 +1107,8 @@ async function handleReady(context: TresContext) {
     game.dirLight = dirLight
     game.hemiLight = hemiLight
     game.contactListener = contactListener
+    game.models = models
+    game.trackCells = cells
 
     syncCameraModes()
     cameraRig.update(1 / 60, vehicle)
@@ -586,7 +1118,9 @@ async function handleReady(context: TresContext) {
     if (minimapEnabled) {
       updateMinimapCamera(minimapCamera, minimapViewport.value)
     }
+    syncRemoteVehicles(multiplayer.players)
     loading.value = false
+    startRoomSync()
   }
   catch (error) {
     console.error(error)
@@ -728,6 +1262,10 @@ function handleBeforeLoop(context: TresContextWithClock) {
   particles.update(dt, vehicle)
   driftMarks.update(dt, vehicle)
   audio.update(dt, Math.abs(vehicle.linearSpeed), input.z, vehicle.driftIntensity)
+
+  for (const remote of game.remoteVehicles.values()) {
+    remote.update(dt)
+  }
 }
 
 onMounted(() => {
@@ -769,6 +1307,87 @@ onUnmounted(() => {
     />
 
     <div v-if="!loading && !fatalError" class="racing-hud">
+      <section class="racing-room-panel">
+        <p class="racing-kicker">Multiplayer Prototype</p>
+        <h3>{{ roomConnected ? `Room ${multiplayer.roomId}` : 'Room Lobby' }}</h3>
+        <p class="racing-room-status" :class="{ 'is-error': Boolean(multiplayer.error) }">
+          {{ roomStatusText }}
+        </p>
+
+        <div class="racing-room-fields">
+          <label class="racing-room-field">
+            <span>Driver Name</span>
+            <input
+              v-model="multiplayer.playerName"
+              class="racing-room-input"
+              type="text"
+              maxlength="18"
+              placeholder="Driver 204"
+            >
+          </label>
+
+          <label v-if="!roomConnected" class="racing-room-field">
+            <span>Room Code</span>
+            <input
+              v-model="multiplayer.joinCode"
+              class="racing-room-input"
+              type="text"
+              inputmode="text"
+              maxlength="5"
+              placeholder="AB12C"
+              @input="multiplayer.joinCode = normalizeRoomCode(multiplayer.joinCode)"
+              @keyup.enter="joinRoom"
+            >
+          </label>
+        </div>
+
+        <div class="racing-room-actions">
+          <button
+            v-if="!roomConnected"
+            class="racing-room-button is-primary"
+            :disabled="multiplayer.status === 'joining'"
+            @click="createRoom"
+          >
+            Create Room
+          </button>
+          <button
+            v-if="!roomConnected"
+            class="racing-room-button"
+            :disabled="multiplayer.status === 'joining'"
+            @click="joinRoom"
+          >
+            Join
+          </button>
+          <button
+            v-if="roomConnected"
+            class="racing-room-button is-primary"
+            @click="copyShareLink"
+          >
+            Copy Invite
+          </button>
+          <button
+            v-if="roomConnected"
+            class="racing-room-button"
+            @click="leaveRoom"
+          >
+            Leave
+          </button>
+        </div>
+
+        <div v-if="roomConnected" class="racing-room-roster">
+          <div
+            v-for="player in roomRoster"
+            :key="player.id"
+            class="racing-room-player"
+            :class="{ 'is-self': player.id === multiplayer.playerId }"
+          >
+            <span class="racing-room-player-slot">P{{ player.slot + 1 }}</span>
+            <span class="racing-room-player-name">{{ player.name }}</span>
+            <span class="racing-room-player-state">{{ player.id === multiplayer.playerId ? 'You' : 'Online' }}</span>
+          </div>
+        </div>
+      </section>
+
       <div v-if="minimapEnabled" class="racing-inset racing-minimap-overlay" :style="panelStyle(minimapPanel)">
         <div class="racing-minimap-window" :style="minimapWindowStyle" />
       </div>
