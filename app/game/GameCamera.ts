@@ -6,6 +6,7 @@ export type CameraMode = 'chase' | 'driver'
 export class GameCamera {
   camera: Camera
   mode: CameraMode = 'chase'
+  stabilizedDriverView = false
   chaseOffset = new Vector3(9.27, 9.18, 9.27)
   driverOffset = new Vector3(0.14, 0.9, 0.86)
   driverLookAhead = new Vector3(0.14, 0.72, 6.8)
@@ -50,7 +51,9 @@ export class GameCamera {
   }
 
   private updateDriverView(dt: number, vehicle: Vehicle): void {
-    const anchor = vehicle.bodyNode ?? vehicle.container
+    const anchor = this.stabilizedDriverView
+      ? vehicle.container
+      : (vehicle.bodyNode ?? vehicle.container)
 
     this.desiredPosition.copy(this.driverOffset)
     anchor.localToWorld(this.desiredPosition)

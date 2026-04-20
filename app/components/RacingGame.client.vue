@@ -54,6 +54,9 @@ const VEHICLE_LAYER = 1
 const MAIN_COCKPIT_LAYER = 2
 const PREVIEW_COCKPIT_LAYER = 3
 const MINIMAP_PADDING = 4
+const firstPersonEnabled = false
+const previewEnabled = false
+const minimapEnabled = false
 const root = useTemplateRef<HTMLElement>('root')
 const route = useRoute()
 const mainCamera = shallowRef(new PerspectiveCamera(40, 1, 0.1, 80))
@@ -124,9 +127,15 @@ const game: GameState = {
   contactListener: null,
 }
 
-const previewMode = computed<CameraMode>(() => (
-  cameraMode.value === 'chase' ? 'driver' : 'chase'
-))
+let resizeObserver: ResizeObserver | null = null
+
+const previewMode = computed<CameraMode>(() => {
+  if (!firstPersonEnabled) {
+    return 'chase'
+  }
+
+  return cameraMode.value === 'chase' ? 'driver' : 'chase'
+})
 
 const previewPanel = computed<HudPanel>(() => {
   const mobile = viewportSize.width <= 720
@@ -144,21 +153,44 @@ const previewPanel = computed<HudPanel>(() => {
 
 const minimapPanel = computed<HudPanel>(() => {
   const mobile = viewportSize.width <= 720
-  const halfWidth = trackBoundsState.halfWidth + MINIMAP_PADDING
-  const halfHeight = trackBoundsState.halfDepth + MINIMAP_PADDING
-  const mapAspect = (halfWidth * 2) / (halfHeight * 2)
-
-  const width = mobile
-    ? Math.min(188, Math.max(138, viewportSize.width * 0.4))
-    : Math.min(248, Math.max(196, viewportSize.width * 0.19))
-
-  const height = Math.max(120, Math.min(240, width / mapAspect))
+  // Keep the minimap inside a fixed HUD frame and let the camera fit the track into it.
+  const size = mobile
+    ? Math.min(148, Math.max(110, Math.min(previewPanel.value.width * 0.78, viewportSize.width * 0.29)))
+    : Math.min(176, Math.max(138, Math.min(previewPanel.value.width * 0.66, viewportSize.width * 0.14)))
 
   return {
-    width,
-    height,
+    width: size,
+    height: size,
     left: mobile ? 16 : 22,
     bottom: mobile ? 168 : 22,
+  }
+})
+
+const minimapWindowInset = computed(() => (
+  viewportSize.width <= 720 ? 10 : 12
+))
+
+const minimapViewport = computed<HudPanel>(() => {
+  const inset = minimapWindowInset.value
+  const panel = minimapPanel.value
+
+  return {
+    width: Math.max(1, panel.width - inset * 2),
+    height: Math.max(1, panel.height - inset * 2),
+    bottom: panel.bottom + inset,
+    left: panel.left === undefined ? undefined : panel.left + inset,
+    right: panel.right === undefined ? undefined : panel.right + inset,
+  }
+})
+
+const minimapWindowStyle = computed(() => {
+  const inset = `${Math.round(minimapWindowInset.value)}px`
+
+  return {
+    top: inset,
+    right: inset,
+    bottom: inset,
+    left: inset,
   }
 })
 
@@ -174,8 +206,16 @@ function getOppositeMode(mode: CameraMode): CameraMode {
 }
 
 function syncViewportSize() {
-  viewportSize.width = window.innerWidth
-  viewportSize.height = window.innerHeight
+  const hostRect = root.value?.getBoundingClientRect()
+
+  if (hostRect && hostRect.width > 0 && hostRect.height > 0) {
+    viewportSize.width = hostRect.width
+    viewportSize.height = hostRect.height
+    return
+  }
+
+  viewportSize.width = document.documentElement.clientWidth || window.innerWidth
+  viewportSize.height = document.documentElement.clientHeight || window.innerHeight
 }
 
 function panelStyle(panel: HudPanel) {
@@ -257,14 +297,17 @@ function updateMinimapCamera(camera: OrthographicCamera, panel: HudPanel) {
 }
 
 function syncCameraModes() {
+  const mainMode: CameraMode = firstPersonEnabled ? cameraMode.value : 'chase'
+
   if (game.cameraRig?.camera instanceof PerspectiveCamera) {
-    game.cameraRig.setMode(cameraMode.value)
-    configurePerspectiveCamera(game.cameraRig.camera, cameraMode.value, MAIN_COCKPIT_LAYER)
+    game.cameraRig.setMode(mainMode)
+    configurePerspectiveCamera(game.cameraRig.camera, mainMode, MAIN_COCKPIT_LAYER)
   }
 
-  if (game.previewCamera && game.previewCameraRig) {
-    game.previewCameraRig.setMode(previewMode.value)
-    configurePerspectiveCamera(game.previewCamera, previewMode.value, PREVIEW_COCKPIT_LAYER)
+  if (previewEnabled && game.previewCamera && game.previewCameraRig) {
+    const insetMode: CameraMode = firstPersonEnabled ? previewMode.value : 'chase'
+    game.previewCameraRig.setMode(insetMode)
+    configurePerspectiveCamera(game.previewCamera, insetMode, PREVIEW_COCKPIT_LAYER)
   }
 
   if (game.minimapCamera) {
@@ -274,6 +317,10 @@ function syncCameraModes() {
 }
 
 function swapCameraViews() {
+  if (!firstPersonEnabled || !previewEnabled) {
+    return
+  }
+
   cameraMode.value = getOppositeMode(cameraMode.value)
   syncCameraModes()
 }
@@ -388,6 +435,13 @@ async function handleReady(context: TresContext) {
     hemiLight.position.copy(dirLight.position)
     hemiLight.layers.enable(VEHICLE_LAYER)
 
+    if (firstPersonEnabled) {
+      dirLight.layers.enable(MAIN_COCKPIT_LAYER)
+      dirLight.layers.enable(PREVIEW_COCKPIT_LAYER)
+      hemiLight.layers.enable(MAIN_COCKPIT_LAYER)
+      hemiLight.layers.enable(PREVIEW_COCKPIT_LAYER)
+    }
+
     scene.add(dirLight)
     scene.add(hemiLight)
 
@@ -451,22 +505,37 @@ async function handleReady(context: TresContext) {
     const cameraRig = new GameCamera(activeCamera)
     cameraRig.targetPosition.copy(vehicle.spherePos)
 
-    const previewCamera = new PerspectiveCamera(50, 1, 0.1, 80)
-    const previewCameraRig = new GameCamera(previewCamera)
-    previewCameraRig.targetPosition.copy(vehicle.spherePos)
+    const previewCamera = previewEnabled
+      ? new PerspectiveCamera(50, 1, 0.1, 80)
+      : null
+    const previewCameraRig = previewCamera
+      ? new GameCamera(previewCamera)
+      : null
+    if (previewCameraRig) {
+      previewCameraRig.stabilizedDriverView = true
+      previewCameraRig.targetPosition.copy(vehicle.spherePos)
+    }
 
     const minimapCamera = new OrthographicCamera(-30, 30, 30, -30, 0.1, 220)
     minimapCamera.layers.enable(VEHICLE_LAYER)
 
-    const mainCockpit = createCockpitRig()
-    setLayer(mainCockpit, MAIN_COCKPIT_LAYER)
-    mainCockpit.visible = false
-    scene.add(mainCockpit)
+    const mainCockpit = firstPersonEnabled
+      ? createCockpitRig()
+      : null
+    if (mainCockpit) {
+      setLayer(mainCockpit, MAIN_COCKPIT_LAYER)
+      mainCockpit.visible = false
+      scene.add(mainCockpit)
+    }
 
-    const previewCockpit = createCockpitRig()
-    setLayer(previewCockpit, PREVIEW_COCKPIT_LAYER)
-    previewCockpit.visible = false
-    scene.add(previewCockpit)
+    const previewCockpit = firstPersonEnabled && previewEnabled
+      ? createCockpitRig()
+      : null
+    if (previewCockpit) {
+      setLayer(previewCockpit, PREVIEW_COCKPIT_LAYER)
+      previewCockpit.visible = false
+      scene.add(previewCockpit)
+    }
 
     const controls = new Controls({ root: root.value })
     const particles = new SmokeTrails(worldRoot)
@@ -511,10 +580,12 @@ async function handleReady(context: TresContext) {
 
     syncCameraModes()
     cameraRig.update(1 / 60, vehicle)
-    previewCameraRig.update(1 / 60, vehicle)
-    syncCockpit(mainCockpit, activeCamera, cameraMode.value)
-    syncCockpit(previewCockpit, previewCamera, previewMode.value)
-    updateMinimapCamera(minimapCamera, minimapPanel.value)
+    previewCameraRig?.update(1 / 60, vehicle)
+    syncCockpit(mainCockpit, activeCamera, firstPersonEnabled ? cameraMode.value : 'chase')
+    syncCockpit(previewCockpit, previewCamera, firstPersonEnabled ? previewMode.value : 'chase')
+    if (minimapEnabled) {
+      updateMinimapCamera(minimapCamera, minimapViewport.value)
+    }
     loading.value = false
   }
   catch (error) {
@@ -565,7 +636,11 @@ function renderInset(
 
 function handleRender(context: TresContext) {
   const { scene, previewCamera, minimapCamera } = game
-  if (!scene || !previewCamera || !minimapCamera) {
+  if (!scene || (!previewEnabled && !minimapEnabled)) {
+    return
+  }
+
+  if ((previewEnabled && !previewCamera) || (minimapEnabled && !minimapCamera)) {
     return
   }
 
@@ -581,10 +656,15 @@ function handleRender(context: TresContext) {
 
   renderer.autoClear = false
   renderer.setScissorTest(true)
-  renderer.clearDepth()
-  renderInset(renderer, scene, previewCamera, previewPanel.value)
-  renderer.clearDepth()
-  renderInset(renderer, scene, minimapCamera, minimapPanel.value)
+  if (previewEnabled && previewCamera) {
+    renderer.clearDepth()
+    renderInset(renderer, scene, previewCamera, previewPanel.value)
+  }
+
+  if (minimapEnabled && minimapCamera) {
+    renderer.clearDepth()
+    renderInset(renderer, scene, minimapCamera, minimapViewport.value)
+  }
 
   renderer.setScissorTest(previousScissorTest)
   renderer.setViewport(previousViewport)
@@ -614,12 +694,9 @@ function handleBeforeLoop(context: TresContextWithClock) {
     || !controls
     || !dirLight
     || !cameraRig
-    || !previewCameraRig
     || !particles
     || !driftMarks
     || !audio
-    || !mainCockpit
-    || !previewCockpit
   ) {
     return
   }
@@ -641,9 +718,13 @@ function handleBeforeLoop(context: TresContextWithClock) {
   )
 
   cameraRig.update(dt, vehicle)
-  previewCameraRig.update(dt, vehicle)
-  syncCockpit(mainCockpit, cameraRig.camera as PerspectiveCamera, cameraMode.value)
-  syncCockpit(previewCockpit, previewCameraRig.camera as PerspectiveCamera, previewMode.value)
+  previewCameraRig?.update(dt, vehicle)
+  syncCockpit(mainCockpit, cameraRig.camera as PerspectiveCamera, firstPersonEnabled ? cameraMode.value : 'chase')
+  syncCockpit(
+    previewCockpit,
+    previewCameraRig?.camera as PerspectiveCamera | null,
+    firstPersonEnabled ? previewMode.value : 'chase',
+  )
   particles.update(dt, vehicle)
   driftMarks.update(dt, vehicle)
   audio.update(dt, Math.abs(vehicle.linearSpeed), input.z, vehicle.driftIntensity)
@@ -652,10 +733,20 @@ function handleBeforeLoop(context: TresContextWithClock) {
 onMounted(() => {
   syncViewportSize()
   window.addEventListener('resize', syncViewportSize)
+
+  resizeObserver = new ResizeObserver(() => {
+    syncViewportSize()
+  })
+
+  if (root.value && resizeObserver) {
+    resizeObserver.observe(root.value)
+  }
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', syncViewportSize)
+  resizeObserver?.disconnect()
+  resizeObserver = null
   disposeGame()
 })
 </script>
@@ -663,7 +754,7 @@ onUnmounted(() => {
 <template>
   <div ref="root" class="racing-shell">
     <TresCanvas
-      window-size
+      class="racing-canvas"
       :camera="mainCamera"
       :dpr="[1, 2]"
       clear-color="#adb2ba"
@@ -678,9 +769,12 @@ onUnmounted(() => {
     />
 
     <div v-if="!loading && !fatalError" class="racing-hud">
-      <div class="racing-inset racing-minimap-overlay" :style="panelStyle(minimapPanel)" />
+      <div v-if="minimapEnabled" class="racing-inset racing-minimap-overlay" :style="panelStyle(minimapPanel)">
+        <div class="racing-minimap-window" :style="minimapWindowStyle" />
+      </div>
 
       <div
+        v-if="previewEnabled"
         class="racing-inset racing-preview-overlay"
         :style="panelStyle(previewPanel)"
         @click="swapCameraViews"

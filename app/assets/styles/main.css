@@ -27,6 +27,11 @@ canvas {
   touch-action: none;
 }
 
+.racing-canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+
 .racing-shell {
   position: fixed;
   inset: 0;
@@ -83,8 +88,19 @@ canvas {
 }
 
 .racing-minimap-overlay {
+  overflow: hidden;
+  background: transparent;
+}
+
+.racing-minimap-window {
+  position: absolute;
+  border-radius: 0.95rem;
+  box-shadow:
+    0 0 0 999px rgba(6, 10, 12, 0.48),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
   background:
-    linear-gradient(180deg, rgba(9, 14, 17, 0.18), rgba(4, 7, 9, 0.08));
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  pointer-events: none;
 }
 
 .racing-preview-overlay {
